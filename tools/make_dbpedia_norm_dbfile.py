@@ -45,7 +45,7 @@ def generate_dbfile(alias_dict):
                 wiki_title, wiki_title, wiki_id))
             # Add name:Alias.
             if wiki_title in alias_dict['alias']:
-                dbentries[-1].extend(
+                dbentries[-1].append(
                     '\t'.join([u'name:Alias:{:s}'.format(alias)
                                for alias
                                in list(alias_dict['alias'][wiki_title])])
@@ -67,7 +67,7 @@ def handle_argument(cmd_line_args=None):
 
     args = parser.parse_args()
 
-    generate_dbfile(args)
+    generate_dbfile(args.alias_dict)
 
 
 if __name__ == '__main__':
