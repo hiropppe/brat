@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 # -*- coding:utf8 -*-
 
+from __future__ import unicode_literals
+
 import bz2
 import codecs
 import gzip
@@ -8,6 +10,7 @@ import mwparserfromhell
 import multiprocessing
 import re
 import sys
+import unicodedata
 
 from collections import defaultdict
 from functools import partial
@@ -22,10 +25,11 @@ except ImportError:
     import pickle
 
 
-RE_parentheses_id2title = re.compile(
-    ur"\((\d+),\d+,'?([^,']+)'?,[^\)]+\)")
-RE_aimai_items = re.compile(
-    ur'^[\*\+]+\s\[\[(.+?)(?:\||\]\])', flags=re.DOTALL | re.MULTILINE)
+re_parentheses_id2title = re.compile(
+    r"\((\d+),\d+,'?([^,']+)'?,[^\)]+\)")
+re_aimai_items = re.compile(
+    r'^[\*\+]+\s\[\[(.+?)(?:\||\]\])', flags=re.DOTALL | re.MULTILINE)
+re_title_brackets = re.compile(' \([^\)]+\)$')
 
 DEFAULT_IGNORED_NS = (
     'wikipedia:', 'category:', 'file:', 'portal:', 'template:', 'mediawiki:',
@@ -39,7 +43,7 @@ sys.stderr = codecs.getwriter('utf8')(sys.stderr)
 
 def extract_id2title_from_sql(path):
     with gzip.GzipFile(path) as fd:
-        return dict(RE_parentheses_id2title.findall(fd.read().decode('utf8')))
+        return dict(re_parentheses_id2title.findall(fd.read().decode('utf8')))
 
 
 class WikiDumpReader(object):
@@ -59,62 +63,82 @@ class WikiDumpReader(object):
             for (title, wiki_text, wiki_id) in wikicorpus.extract_pages(f):
                 if any([title.lower().startswith(ns) for ns in self._ignored_ns]):
                     continue
-                yield (unicode(title), unicode(wiki_text), unicode(wiki_id))
+                # Don't use decode, type uncertain ... unicode? str? 
+                yield (norm_title(unicode(title)), unicode(wiki_text), unicode(wiki_id))
 
 
-def _return_it(value):
-    return value
+def extract(value):
+    title, wiki_text, wiki_id = value
+    wiki_code = mwparserfromhell.parse(wiki_text)
+    wikilinks = []
+    for node in wiki_code.nodes:
+        if isinstance(node, mwparserfromhell.nodes.Wikilink):
+            node_title = norm_title(unicode(node.title.strip_code()))
+            # Add only when anchor text not equals the title (= node.text has value).
+            if node.text:
+                node_text = norm_alias(unicode(node.text.strip_code()))
+                if re.match(r'^[\s\u3000]+$', node_text) is None:
+                    wikilinks.append((node_text, node_title))
+    aimais = []
+    if wiki_code.contains('{{aimai}}') or wiki_code.contains('{{Aimai}}'):
+        for entity_title in re_aimai_items.findall(unicode(wiki_code)):
+            aimais.append(norm_title(entity_title))
+    return wiki_id, title, wikilinks, aimais
+
+
+def norm_title(title):
+    return title.replace('_', ' ')
+
+
+def norm_alias(alias):
+    alias = unicodedata.normalize('NFKC', alias)
+    alias = re_title_brackets.sub('', alias)
+    alias = alias.replace('_', ' ')
+    alias = alias.replace('\t', ' ')
+    alias = alias.replace('\n', '')
+    return alias
 
 
 def extract_alias_entity(dump_reader,
                          page_sql_dump,
                          redirect_sql_dump,
-                         parallel=False,
-                         pool_size=multiprocessing.cpu_count(),
-                         chunk_size=100):
+                         pool_size,
+                         chunk_size=10):
     e2a = defaultdict(lambda: defaultdict(lambda: set()))
 
-    sys.stderr.write('(Preprocess) Building Title dict ...\n')
+    sys.stderr.write('(Preprocess) Reading page.sql ...\n')
     id2title = extract_id2title_from_sql(page_sql_dump)
-    sys.stderr.write('(Preprocess) Building Redirection dict ...\n')
+    sys.stderr.write('(Preprocess) Reading redirect.sql ...\n')
     rd_id2title = extract_id2title_from_sql(redirect_sql_dump)
 
-    if parallel:
+    if pool_size > 1:
         pool = Pool(pool_size)
         imap_func = partial(pool.imap_unordered, chunksize=chunk_size)
     else:
         imap_func = imap
 
     sys.stderr.write('Building Alias dict ...\n')
-    for (title, wiki_txt, wiki_id) in tqdm(imap_func(_return_it, dump_reader)):
-        # redirect
+    pbar = tqdm()
+    for (wiki_id, title, wikilinks, aimais) in imap_func(extract, dump_reader):
         if wiki_id in id2title and wiki_id in rd_id2title:
-            e2a['alias'][rd_id2title[wiki_id]].add(id2title[wiki_id].replace(' ', '_'))
-            e2a['redirect'][wiki_id].add(id2title[wiki_id].replace(' ', '_'))
+            e2a['alias'][norm_title(rd_id2title[wiki_id])].add(norm_alias(id2title[wiki_id]))
+            e2a['redirect'][wiki_id].add(id2title[wiki_id])
 
-        title = title.replace(' ', '_')
-        wiki_code = mwparserfromhell.parse(wiki_txt)
-        # anchor
-        for node in wiki_code.nodes:
-            if isinstance(node, mwparserfromhell.nodes.Wikilink):
-                e = unicode(node.title.strip_code()).replace(' ', '_')
-                # Add only when anchor text not equals the title (= node.text has value).
-                if node.text and re.match(ur'^[\s\u3000]+$', node.text.strip_code()) is None:
-                    anchor = unicode(node.text.strip_code())
-                    e2a['alias'][e.replace(' ', '_')].add(anchor)
+        for node_text, node_title in wikilinks:
+            e2a['alias'][node_title].add(node_text)
 
-        # aimai
-        if wiki_code.contains('{{Aimai}}'):
-            for e in RE_aimai_items.findall(unicode(wiki_code)):
-                e2a['alias'][e.replace(' ', '_')].add(title)
-                e2a['aimai'][wiki_id].add(title)
+        for disambi_title in aimais:
+            e2a['alias'][disambi_title].add(norm_alias(title))
+            e2a['aimai'][wiki_id].add(title)
+
+        pbar.update(1)
 
     return e2a
 
 
-def main(wiki_dump, page_sql_dump, redirect_sql_dump, out):
+def main(wiki_dump, page_sql_dump, redirect_sql_dump, out, pool_size):
     dump_reader = WikiDumpReader(wiki_dump)
-    e2a = extract_alias_entity(dump_reader, page_sql_dump, redirect_sql_dump)
+    e2a = extract_alias_entity(dump_reader, page_sql_dump, redirect_sql_dump, pool_size=pool_size)
     with open(out, mode='w') as fo:
         pickle.dump({'alias': dict(e2a['alias']),
                      'redirect': dict(e2a['redirect']),
@@ -134,6 +158,9 @@ if __name__ == '__main__':
         '--redirect_sql_dump', '-r', type=str, default=None, required=True,
         help='Wikipedia redirect sql dump file (gz)')
     parser.add_argument(
+        '--pool_size', '-P', type=int, default=multiprocessing.cpu_count(), required=False,
+        help='Process pool size.')
+    parser.add_argument(
         'out', metavar='OUT', type=str,
         help='Output pickle dump file of dictionary.'
     )
@@ -142,4 +169,5 @@ if __name__ == '__main__':
     main(args.pages_article_dump,
          args.page_sql_dump,
          args.redirect_sql_dump,
-         args.out)
+         args.out,
+         args.pool_size)
