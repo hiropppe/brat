@@ -16,7 +16,7 @@ except ImportError:
     import pickle
 
 re_parentheses_id2title = re.compile(
-    r"\((\d+),\d+,'?([^,']+)'?,[^\)]+\)")
+    r"\((\d+),(\d+),'?([^,']+)'?,[^\)]+\)")
 
 sys.stdin = codecs.getreader('utf8')(sys.stdin)
 sys.stdout = codecs.getwriter('utf8')(sys.stdout)
@@ -29,9 +29,10 @@ def norm_title(title):
 
 def get_pages(path):
     with gzip.GzipFile(path) as fd:
-        return [(p[0], norm_title(p[1]))
+        return [(p[0], norm_title(p[2]))
                 for p
-                in re_parentheses_id2title.findall(fd.read().decode('utf8'))]
+                in re_parentheses_id2title.findall(fd.read().decode('utf8'))
+                if p[1] == '0']
 
 
 def generate_dbfile(page_sql_dump, alias_dict):
@@ -40,7 +41,7 @@ def generate_dbfile(page_sql_dump, alias_dict):
         alias_dict = pickle.load(fi)
 
     dbentries = []
-    sys.stderr.write('Building DB file entry ...\n')
+    sys.stderr.write('Extracting DB file entry ...\n')
     for wiki_id, title in tqdm(get_pages(page_sql_dump)):
         # Ignore Aimai Template and Redirection.
         if wiki_id in alias_dict['aimai'] or wiki_id in alias_dict['redirect']:

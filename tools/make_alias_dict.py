@@ -6,8 +6,9 @@ from __future__ import unicode_literals
 import bz2
 import codecs
 import gzip
-import mwparserfromhell
+import mojimoji
 import multiprocessing
+import mwparserfromhell
 import re
 import sys
 import unicodedata
@@ -78,7 +79,8 @@ def extract(value):
             if node.text:
                 node_text = norm_alias(unicode(node.text.strip_code()))
                 if re.match(r'^[\s\u3000]+$', node_text) is None:
-                    wikilinks.append((node_text, node_title))
+                    for more_text in expand_alias(node_text):
+                        wikilinks.append((more_text, node_title))
     aimais = []
     if wiki_code.contains('{{aimai}}') or wiki_code.contains('{{Aimai}}'):
         for entity_title in re_aimai_items.findall(unicode(wiki_code)):
@@ -97,6 +99,17 @@ def norm_alias(alias):
     alias = alias.replace('\t', ' ')
     alias = alias.replace('\n', '')
     return alias
+
+
+def expand_alias(alias):
+    zenhan = [alias]
+    if alias != mojimoji.han_to_zen(alias):
+        zenhan.append(mojimoji.han_to_zen(alias))
+    elif alias != mojimoji.zen_to_han(alias):
+        zenhan.append(mojimoji.zen_to_han(alias))
+    else:
+        pass
+    return zenhan
 
 
 def extract_alias_entity(dump_reader,
@@ -121,14 +134,18 @@ def extract_alias_entity(dump_reader,
     pbar = tqdm()
     for (wiki_id, title, wikilinks, aimais) in imap_func(extract, dump_reader):
         if wiki_id in id2title and wiki_id in rd_id2title:
-            e2a['alias'][norm_title(rd_id2title[wiki_id])].add(norm_alias(id2title[wiki_id]))
+            alias = norm_alias(id2title[wiki_id])
+            for more_alias in expand_alias(alias):
+                e2a['alias'][norm_title(rd_id2title[wiki_id])].add(more_alias)
             e2a['redirect'][wiki_id].add(id2title[wiki_id])
 
         for node_text, node_title in wikilinks:
             e2a['alias'][node_title].add(node_text)
 
         for disambi_title in aimais:
-            e2a['alias'][disambi_title].add(norm_alias(title))
+            alias = norm_alias(title)
+            for more_alias in expand_alias(alias):
+                e2a['alias'][disambi_title].add(more_alias)
             e2a['aimai'][wiki_id].add(title)
 
         pbar.update(1)
@@ -139,6 +156,7 @@ def extract_alias_entity(dump_reader,
 def main(wiki_dump, page_sql_dump, redirect_sql_dump, out, pool_size):
     dump_reader = WikiDumpReader(wiki_dump)
     e2a = extract_alias_entity(dump_reader, page_sql_dump, redirect_sql_dump, pool_size=pool_size)
+    sys.stderr.write('Writing Alias dict ...\n')
     with open(out, mode='w') as fo:
         pickle.dump({'alias': dict(e2a['alias']),
                      'redirect': dict(e2a['redirect']),
